@@ -1,74 +1,129 @@
-# Windows iPad KVM——无需快捷键版
+# MouseLink
 
-[English](README.md) | 简体中文
+**通过 ESP32-C3 USB 转蓝牙 HID 桥，让 Windows 的键盘和鼠标直接控制 iPad。**
 
-通过 ESP32-C3 蓝牙 HID 桥，让一套 Windows 键盘和鼠标直接操控 iPad。将鼠标从 Windows 桌面右侧移出即可进入 iPad；在 iPad 左侧继续向左推动即可自动返回 Windows，正常切换不需要按快捷键。
+[English](README.md) · [项目仓库](https://github.com/tukitohosi/mouselink)
 
-`Windows 输入 -> Python 主程序 -> USB 串口 -> ESP32-C3 -> 蓝牙 HID -> iPad`
+MouseLink 在 Windows 上捕获键鼠输入，经 USB 发送给 ESP32-C3，再由开发板模拟蓝牙键盘和鼠标，控制 iPad 自身的界面。iPad 无需安装应用，无需投屏，也无需与电脑处于同一 Wi-Fi 网络。使用时不要求开启辅助触控。
 
-## 功能
+```text
+Windows 键盘和鼠标 → MouseLink → USB → ESP32-C3 → 蓝牙 HID → iPad
+```
 
-- 从 Windows 桌面右边缘进入 iPad。
-- 从虚拟左边缘自动返回 Windows。
-- 保留 `Ctrl+Alt+Esc` 和 `Scroll Lock` 作为紧急返回方式。
-- 转发鼠标移动、五个鼠标按键、滚轮和键盘输入。
-- Windows/GUI 键和 Alt 键分别对应 iPad Command 和 Option 修饰键。
-- iPad 未连接时拒绝进入远端；USB、蓝牙或输入捕获发生故障时释放 Windows 输入。
-- iPad 无需安装常驻 App，也不依赖云服务。
+## 当前版本与已知限制
 
-## 环境要求
+1.0.2 日常版采用已恢复的混合鼠标方案，配合原有 v3 固件：屏内使用绝对定位，部分边缘操作使用相对移动。正常使用没有单次会话时限。
 
-- Windows 10 或 Windows 11。
-- Python 3.11 或更高版本。
-- ESP32-C3 开发板和支持数据传输的 USB 线。
-- iPadOS 13.4 或更高版本。
-- 用于构建和刷写固件的 PlatformIO。
+**已知问题：**调出 Dock 或退出应用时，偶尔会出现 Dock 无法调出、弹出后又收起的情况。将指针移回屏幕内，再尝试一次底部操作。本版本不宣称与 iPad 直接连接蓝牙鼠标的全部行为完全一致。
 
-## 安装与使用
+回退后已由用户确认从电脑进入 iPad、点击打开应用、从 iPad 左边缘返回电脑三步正常。测试使用 Windows 11 x64，以及运行 iPadOS 26.6.1 的 iPad Pro M5（2025）。这些结果不代表所有 iPad 均兼容，也不代表全部系统边缘操作、横竖屏和所有模式均完成重复验收。
 
-1. 安装固件构建工具，并构建、刷写 ESP32-C3：
+## 所需设备
 
-   ```powershell
-   py -m pip install platformio
-   cd firmware
-   pio run
-   pio run --target upload --upload-port COM3
-   cd ..
-   ```
+| 项目 | 要求 |
+| --- | --- |
+| 电脑 | Windows x64，连接需要共用的键盘和鼠标；已测试 Windows 11 |
+| 开发板 | ESP32-C3 SuperMini，原生 USB 接口，4 MB Flash |
+| 连接线 | 支持数据传输的 USB 线，用于连接开发板与电脑 |
+| iPad | 支持蓝牙鼠标，开启蓝牙并保持解锁 |
+| 电脑软件 | MouseLink 安装包、便携版，或通过本仓库源码自行构建 |
 
-2. 在 iPad 蓝牙设置中配对 `MouseLink-iPad`。
-3. 创建 Windows Python 环境：
+内置刷机流程仅针对上表中的开发板。通过 CH340/CP210x 转串口连接的开发板、其他 ESP32 型号和其他 Flash 容量不在其支持选择范围内。电脑无需自带蓝牙适配器：与 iPad 通信的蓝牙由 ESP32-C3 提供。
 
-   ```powershell
-   py -m venv .venv
-   .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-   ```
+## 安装与开始使用
 
-4. 启动桥接程序：
+本 Git 仓库仅保存源码。Windows 安装包、便携包及固件二进制由作者另行提供，或在本地从源码构建；文档不假定 GitHub 已提供二进制下载。
 
-   ```powershell
-   .\.venv\Scripts\python.exe host\bridge.py
-   ```
+1. 运行作者提供的 `MouseLink-1.0.2-Setup.exe`；也可以解压便携包，运行 `MouseLink.exe`。请完整保留便携版文件夹，包括 `_internal`。
+2. 用 USB 数据线连接 ESP32-C3 与电脑。新开发板先按下方步骤刷入固件。
+3. 在 iPad 的“设置 → 蓝牙”中配对 **MouseLink-iPad**，并保持 iPad 解锁。
+4. 首次使用新开发板时，在软件内点击“**检查光标位置**”，分别检查横屏和竖屏，并确认位置正确。
+5. 选择切换模式，点击“**开启键鼠桥**”。
 
-5. 将鼠标移动到 Windows 桌面右边缘进入 iPad；在 iPad 左边缘继续向左推动即可返回。遇到异常时按 `Ctrl+Alt+Esc` 紧急返回。
+打包版已包含 Python 运行时和刷机工具。日常使用和内置固件刷写均无需另装 Python、Arduino、PlatformIO，也不需要 iPad 应用。当前软件界面为中文。
 
-程序会自动查找 Espressif 串口设备。如果没有检测到开发板，请检查 USB 数据线、COM 端口、固件以及 iPad 蓝牙连接。
+## 操作方法
 
-## 重要说明
+将 Windows 指针推到电脑右边缘，稍停即可进入 iPad。调整模式、快捷键返回开关或指针速度前，请先停止键鼠桥。
 
-- 自动返回依据相对鼠标位移维护虚拟横坐标，并不会获取 iPad 的真实光标坐标。
-- 只有进入 iPad 模式后才会屏蔽 Windows 本地输入。
-- 中文通过 iPad 自带输入法输入；Windows 输入法的候选及组合状态不会直接传递。
-- 本项目不包含屏幕投射、文件拖放或跨设备剪贴板同步。
-- 在自己的鼠标、屏幕布局和 iPad 上完成验证前，请始终保留紧急返回快捷键。
+| 模式 | 返回电脑的方法 |
+| --- | --- |
+| **自由切换** | 到达 iPad 真正的最左边缘后，继续向左推动 |
+| 自由切换，同时开启“**快捷键返回**” | 左边缘返回，或 `Ctrl + 左 Alt` |
+| **锁定在 iPad** | `Ctrl + 左 Alt`；碰到屏幕边缘不会返回电脑 |
 
-## 源码结构
+- 按下 `Ctrl + 左 Alt` 后将两个键全部松开，返回动作在松开时触发。全新安装的自由模式默认关闭可选快捷键返回开关。
+- `Scroll Lock` 与 `Ctrl + Alt + Esc` 保留为紧急返回快捷键。
+- 按住鼠标键拖动时，不会自动从左边缘返回；松开后再向左推动。
+- 底部操作时，将指针移到最底部，再继续向下推动，保持鼠标键松开。当前混合方案可触发部分 iPad 系统操作，但仍有上述 Dock 问题。边缘操作后，先将指针移回屏幕内，再继续普通指针操作或左返。
+- Windows 键对应 iPad Command，Alt 对应 Option。
+- 关闭 MouseLink 会停止键鼠桥并释放输入；USB 或蓝牙断开时也会触发输入释放。软件不会随开机或插入开发板自动启动。
 
-- `host/bridge.py`：Windows 输入路由和故障恢复。
-- `firmware/`：ESP32-C3 蓝牙 HID 固件和 PlatformIO 配置。
-- `tools/hid_diagnostic.py`：独立 HID 诊断工具。
+## 刷入固件与恢复备份
 
-## 许可证与来源
+1. 点击“**一键刷机**”。软件会停止键鼠桥，让刷机流程使用 USB 连接。
+2. 选择支持的开发板，点击“**备份并刷入**”。连接多个开发板时，必须明确选择目标设备。
+3. 等待备份、写入校验、重启和通信检查完成，全程保持 USB 连接。刷写中关闭窗口时，软件会等待操作结束。
+4. 在 iPad 蓝牙设置中配对或重新连接 **MouseLink-iPad**。完整初始化后，可能需要忽略原来的蓝牙条目，再重新配对。
 
-本项目派生自 [KMChris/esp32-kvm](https://github.com/KMChris/esp32-kvm)，开发时固定在提交 `99c52bc36128867d2a7ed85417c1043a7d06ed5c`。详见 [LICENSE](LICENSE) 和 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+写入前，软件会检查芯片、Flash 容量、设备身份与固件包哈希，并先保存、校验完整备份。已识别的兼容固件只更新应用区，保留配对数据；空白板或未知固件会执行完整初始化，替换开发板原有内容。
 
+“**恢复备份…**”使用 MouseLink 生成的 `backup.json`，仅允许恢复到原开发板，恢复前同样会先备份当前内容。若不能自动进入下载模式，请按住 **BOOT**、轻按一次 **Reset/复位**，再松开 **BOOT** 后重试。刷写结束后不会自动开启键鼠桥，需要自行点击开启。
+
+## 常见问题与本地数据
+
+- **找不到开发板：**检查 USB 线是否支持数据，尝试其他 USB 口，再刷新设备列表。
+- **iPad 没有光标：**保持 iPad 解锁，确认 **MouseLink-iPad** 已连接，并运行光标位置检查。辅助触控不是使用前提。
+- **更换固件或重新配对后仍无光标：**曾通过在 iPad“设置”中关闭蓝牙、拔掉开发板 USB 约 10 秒、重新连接 USB 并开启蓝牙恢复。此方法是观察到的恢复步骤，不代表已确定具体根因。
+- **Dock 收起或退出应用失败：**将指针移回屏幕内后重试。1.0.2 仍保留这一偶发问题。
+- **需要恢复电脑键鼠：**使用紧急返回快捷键，或关闭 MouseLink。
+
+设置和桥接日志位于 `%LOCALAPPDATA%\MouseLink`；固件备份与刷机日志分别位于其 `firmware-backups`、`flash-logs` 子目录。升级及默认卸载会保留这些文件。提交源码时，请勿上传个人固件备份、设备标识或本地日志。
+
+## 开发工具
+
+桌面程序使用 Python 与 PySide6；pynput 负责 Windows 输入捕获，pyserial 负责 USB 串口通信。ESP32-C3 固件通过 PlatformIO 使用 ESP-IDF 构建，内置刷机辅助程序使用 esptool。Windows 程序由 PyInstaller 打包，安装包由 Inno Setup 生成。
+
+| 工具或依赖 | 项目使用版本 |
+| --- | --- |
+| Python | 3.12.10，Windows x64 |
+| PySide6-Essentials / Qt | 6.11.2 |
+| pynput | 1.8.2 |
+| pyserial | 3.5 |
+| esptool | 5.4.0 |
+| PyInstaller | 6.22.3 |
+| PlatformIO Core | 6.2.0 |
+| PlatformIO Espressif32 平台 | 7.1.3 |
+| ESP-IDF | 6.1.0 |
+| Inno Setup | 7.1.0 |
+
+桌面直接依赖固定在 `open_bridge/requirements-desktop.txt`，完整构建环境记录在 `open_bridge/requirements-desktop-lock.txt`。固件配置位于 `open_bridge/platformio.ini` 及配套 `sdkconfig` 文件。
+
+本仓库保留 MouseLink 应用与固件源码、测试、构建脚本、文档和必要的许可证声明。生成的固件与安装包、运行时、缓存、个人设备校准、日志、备份、历史调研及无关的完整上游仓库均不进入 Git。公开校准模板不包含私人设备身份。
+
+安装 Python 3.12 后，在仓库根目录使用 PowerShell 执行：
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r .\open_bridge\requirements-desktop-lock.txt platformio==6.2.0
+.\tools\Build-Firmware.ps1 -Python .\.venv\Scripts\python.exe -PublishBundle .\open_bridge\firmware
+.\.venv\Scripts\python.exe .\tools\Collect-Licenses.py
+.\tools\Build-Desktop.ps1 -Python .\.venv\Scripts\python.exe
+.\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
+```
+
+首次固件构建会下载固定版本的 PlatformIO/ESP-IDF 工具链。脚本将固件源码放入路径仅含 ASCII 字符的独立构建目录；需要指定目录时，可增加 `-BuildRoot C:\MouseLinkBuild`。`-PublishBundle` 会从同一次构建复制启动程序、分区表和应用，并生成大小/SHA-256 清单；不传该参数则仅构建，不覆盖本地固件包。不要混合不同构建的组件。新编译固件仍须实机验收，构建与哈希检查成功不能证明 iPad 操作效果。
+
+桌面程序输出为 `release/1.0.2/MouseLink/MouseLink.exe`。生成安装包时，请安装 Inno Setup 7.1.0 后编译安装脚本，并按实际安装位置调整编译器路径：
+
+```powershell
+& "C:\Program Files (x86)\Inno Setup 7\ISCC.exe" "/DAppVersion=1.0.2" ".\tools\MouseLink.iss"
+```
+
+安装包输出至 `release/1.0.2/`。这些生成文件不进入 Git。依赖固件包的测试须先生成固件包；界面预览、自动化检查与 iPad 实机验收分别进行。
+
+## 来源与许可证
+
+MouseLink 基于 [KMChris/esp32-kvm](https://github.com/KMChris/esp32-kvm)，固定提交为 `99c52bc36128867d2a7ed85417c1043a7d06ed5c`，增加了 ESP32-C3 支持、MouseLink 桌面界面、切换逻辑、绝对定位传输及内置备份刷机流程。绝对鼠标 HID 描述参考校验了 [Neradoc/CircuitPython_Absolute_Mouse](https://github.com/Neradoc/CircuitPython_Absolute_Mouse)。
+
+保留上游版权与 MIT 许可证声明。刷机辅助程序及其 esptool 集成采用 GPL-2.0-or-later 条款；Qt/PySide6、pynput 等依赖保留各自许可证。各组件的详细声明见 [LICENSE](open_bridge/LICENSE)、[THIRD_PARTY_NOTICES.md](open_bridge/THIRD_PARTY_NOTICES.md) 及 `open_bridge/licenses/` 中的许可证文件。
