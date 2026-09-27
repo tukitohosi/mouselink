@@ -32,8 +32,11 @@ class CandidateWorkerTests(unittest.TestCase):
             self.assertTrue(config.native_edges_enabled)
             self.assertTrue(config.absolute_enabled)
             self.assertEqual(config.mode, "mixed")
+            self.assertEqual(config.ipad_side, "right")
             if worker.trial_seconds:
-                timer.assert_called_once_with(worker.trial_seconds, worker.stop_bridge)
+                timer.assert_called_once()
+                self.assertEqual(timer.call_args.args[0], worker.trial_seconds)
+                self.assertTrue(callable(timer.call_args.args[1]))
                 timer.return_value.start.assert_called_once()
                 timer.return_value.cancel.assert_called_once()
             else:
@@ -91,7 +94,7 @@ class DesktopEntryTests(unittest.TestCase):
                         self.assertEqual(window.windowTitle(), "MouseLink · 原生边缘候选版"
                                          if seconds else "MouseLink · 键鼠桥")
                         self.assertEqual(any("每次开启最多" in label for label in labels), bool(seconds))
-                        self.assertIn("原生边缘 · 候选版" if seconds else "键鼠桥  /  1.0.2", labels)
+                        self.assertIn("原生边缘 · 候选版" if seconds else f"键鼠桥  /  {ui.APP_VERSION}", labels)
                         self.assertIsNone(window.worker)
                     finally:
                         window.timer.stop()

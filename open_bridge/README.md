@@ -9,4 +9,8 @@ See [English instructions](../README.md) or [简体中文说明](../README.zh-CN
 - `device-calibration.json`: blank public template; personal settings stay local / 公开空白模板，个人设置保存在本机。
 - `firmware/manifest.json`: firmware package metadata; generate binaries using `tools/Build-Firmware.ps1` / 固件元数据，二进制需从源码构建。
 
-The normal 1.0.2 desktop entry has no session timer. The explicit `--native-edges` diagnostic entry retains its isolated settings and bounded sessions for development. 日常入口不限时；显式诊断入口仍使用隔离设置和限时会话。
+Version 1.0.3 has passed the user's device acceptance. Keep the existing 1.0.2 installer for rollback; clean-machine compatibility remains unverified. 1.0.3 已通过用户实机验收；保留 1.0.2 安装包用于回退，干净机器兼容性尚未验证。
+
+Pointer-position checks are optional. Left/right placement is saved and can be changed while running; see the linked instructions for entry, return and cancellation behavior. These changes reuse the existing v3 firmware. 光标检查改为可选，支持保存左右摆放及运行中换边；进入、返回和取消规则见上方说明，此次改动无需重刷现有 v3 固件。
+
+The normal desktop entry has no session timer. The explicit `--native-edges` diagnostic entry retains its isolated settings and bounded sessions; changing sides does not reset its timer. 日常入口不限时；显式诊断入口仍使用隔离设置和限时会话，换边不会重置计时。

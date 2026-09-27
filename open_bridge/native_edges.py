@@ -1,7 +1,7 @@
 """Experimental absolute positioning with native relative screen-edge motion.
 
 Coordinates after a relative report are estimates, not iPad feedback. They are
-used only to propose a new absolute anchor, never to authorize a left return.
+used only to propose a new absolute anchor, never to authorize an edge return.
 The two Mouse collections still require physical iPad acceptance testing.
 """
 
@@ -67,7 +67,7 @@ class NativeEdges:
     def scroll(self, wheel, now):
         self._enqueue("wheel", wheel, 0, now)
 
-    def _disarm_left(self):
+    def _disarm_return(self):
         self.pointer.edge_sent_at = None
         self.pointer.pending.clear()
 
@@ -100,12 +100,13 @@ class NativeEdges:
         hits = []
         x, y = self.pointer.x, self.pointer.y
         if dx < 0 and x + dx <= 0:
-            # At the left corners, vertical intent belongs to iPad gestures.
+            # At return corners, vertical intent belongs to iPad gestures.
             # Small horizontal jitter must not turn a bottom push into return.
-            if abs(dx) > abs(dy):
+            if self.pointer.return_edge != "left" or abs(dx) > abs(dy):
                 hits.append((-x / dx, "left"))
         if dx > 0 and x + dx >= LIMIT:
-            hits.append(((LIMIT - x) / dx, "right"))
+            if self.pointer.return_edge != "right" or abs(dx) > abs(dy):
+                hits.append(((LIMIT - x) / dx, "right"))
         if dy < 0 and y + dy <= 0:
             hits.append((-y / dy, "top"))
         if dy > 0 and y + dy >= LIMIT:
@@ -114,15 +115,15 @@ class NativeEdges:
             return None
         fraction = min(t for t, _ in hits)
         edges = tuple(edge for t, edge in hits if abs(t - fraction) < 1e-9)
-        # The left edge belongs exclusively to the confirmed Windows return.
-        return None if "left" in edges else (fraction, edges)
+        # The connection edge belongs exclusively to the confirmed Windows return.
+        return None if self.pointer.return_edge in edges else (fraction, edges)
 
     def _inward(self, dx, dy):
-        outward = {"top": -dy, "bottom": dy, "right": dx}
+        outward = {"top": -dy, "bottom": dy, "left": -dx, "right": dx}
         if any(outward[edge] > 0 for edge in self.edges):
             return False
         distance = {"top": self.pointer.y, "bottom": LIMIT - self.pointer.y,
-                    "right": LIMIT - self.pointer.x}
+                    "left": self.pointer.x, "right": LIMIT - self.pointer.x}
         threshold = self.absolute_scale * RESYNC_INWARD_COUNTS
         # Keep small reversals on the relative channel. The clamped shadow
         # naturally cancels this distance when the user pushes back to the edge.
@@ -134,8 +135,8 @@ class NativeEdges:
         ax, ay = dx * scale, dy * scale
         hit = self._first_edge(ax, ay) if not self.buttons else None
         if hit is None:
-            left_return = self.pointer.move(ax, ay, at, self.buttons)
-            self.return_requested = left_return and abs(ax) > abs(ay)
+            edge_return = self.pointer.move(ax, ay, at, self.buttons)
+            self.return_requested = edge_return and abs(ax) > abs(ay)
             if not self.return_requested:
                 self._queue_absolute()
             return
@@ -148,7 +149,9 @@ class NativeEdges:
             self.pointer.y = LIMIT
         if "right" in self.edges:
             self.pointer.x = LIMIT
-        self._disarm_left()
+        if "left" in self.edges:
+            self.pointer.x = 0.0
+        self._disarm_return()
         self.state = "edge_wait"
         self._queue_absolute(barrier="edge")
         if fraction < 1:
@@ -161,7 +164,7 @@ class NativeEdges:
         scale = self.absolute_scale * self.sensitivity
         self.pointer.x = self.pointer._clamp(self.pointer.x + dx * scale)
         self.pointer.y = self.pointer._clamp(self.pointer.y + dy * scale)
-        self._disarm_left()
+        self._disarm_return()
         if not self.buttons and self._inward(dx, dy):
             self.state = "resync_wait"
             self._queue_absolute(barrier="resync")
@@ -180,7 +183,7 @@ class NativeEdges:
             elif kind == "button":
                 self.buttons = x
                 if self.buttons:
-                    self._disarm_left()
+                    self._disarm_return()
                 if self.state == "relative":
                     self._queue_relative(button_event=True)
                 else:
@@ -249,7 +252,7 @@ class NativeEdges:
             self.active_channel = "relative"
         if not success:
             self.failure = "native edge serial write failed"
-            self._disarm_left()
+            self._disarm_return()
             return
         self.active_channel = report.channel
         if report.channel == "relative":
@@ -271,7 +274,7 @@ class NativeEdges:
             return False
         if not accepted:
             self.failure = "BLE report rejected"
-            self._disarm_left()
+            self._disarm_return()
             return False
         # The status parser exposes the latest ACK. A matching newer report
         # proves ordered progress without requiring every older ACK to surface.
@@ -281,7 +284,7 @@ class NativeEdges:
             if report.barrier == "edge":
                 self.state = "relative"
                 self._sent.clear()
-                self._disarm_left()
+                self._disarm_return()
             elif report.barrier == "resync":
                 self.state = "absolute"
                 self.pointer.acknowledge(sequence, x, y, buttons, accepted, at)

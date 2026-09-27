@@ -260,6 +260,12 @@ class BridgeConfig:
     absolute_enabled: bool = False
     absolute_scale: float = 32.0
     native_edges_enabled: bool = False
+    ipad_side: str = "right"
+    require_ready_on_start: bool = False
+
+    def __post_init__(self):
+        if self.ipad_side not in ("left", "right"):
+            self.ipad_side = "right"
 
 
 @dataclass
@@ -717,21 +723,27 @@ class RawMouseCapture(RawInputCapture):
 class CursorManager:
     def __init__(self):
         self._saved_position = None
+        self._locked = False
 
     def lock(self):
+        if self._locked:
+            return
         point = wintypes.POINT()
         if _user32.GetCursorPos(ctypes.byref(point)):
             self._saved_position = (point.x, point.y)
             clip_rect = wintypes.RECT(point.x, point.y, point.x + 1, point.y + 1)
             _user32.ClipCursor(ctypes.byref(clip_rect))
         _user32.ShowCursor(False)
+        self._locked = True
 
     def unlock(self):
         _user32.ClipCursor(None)
         if self._saved_position is not None:
             _user32.SetCursorPos(self._saved_position[0], self._saved_position[1])
             self._saved_position = None
-        _user32.ShowCursor(True)
+        if self._locked:
+            _user32.ShowCursor(True)
+            self._locked = False
 
     @contextmanager
     def locked_context(self):
@@ -776,19 +788,35 @@ class KVMController:
         self._activation_requested.set()
 
     def run(self):
-        if not self._bridge.connect():
-            print(f"[ERROR] Cannot connect to port: {self._config.port}")
-            return
-
-        print(f"[OK] Connected to: {self._config.port}")
-        if self._bridge.wait_for_ble_status():
-            print("[OK] iPad Bluetooth HID is connected")
-        else:
-            print("[INFO] iPad Bluetooth HID is not connected; input stays local")
-
         try:
+            if not self._is_running:
+                return
+            if not self._bridge.connect():
+                if self._config.require_ready_on_start:
+                    raise RuntimeError("Cannot reconnect after changing iPad placement")
+                print(f"[ERROR] Cannot connect to port: {self._config.port}")
+                return
+
+            print(f"[OK] Connected to: {self._config.port}")
+            if self._config.require_ready_on_start:
+                deadline = time.monotonic() + 1.5
+                while (self._is_running and self._bridge.is_connected
+                       and not self._bridge.absolute_ready and time.monotonic() < deadline):
+                    time.sleep(0.02)
+                if not self._is_running:
+                    return
+                if not self._bridge.is_connected or not self._bridge.absolute_ready:
+                    raise RuntimeError("iPad absolute channel is not ready after changing placement")
+                print("[OK] iPad Bluetooth HID is connected")
+            elif self._bridge.wait_for_ble_status():
+                print("[OK] iPad Bluetooth HID is connected")
+            else:
+                print("[INFO] iPad Bluetooth HID is not connected; input stays local")
+
             while self._is_running:
                 if not self._bridge.is_connected:
+                    if self._config.require_ready_on_start:
+                        raise RuntimeError("ESP32 disconnected after changing iPad placement")
                     print("[INFO] Waiting for ESP32-C3; Windows input remains local")
                     if not self._bridge.connect():
                         time.sleep(self._config.reconnect_delay_seconds)
@@ -813,14 +841,16 @@ class KVMController:
         except KeyboardInterrupt:
             pass
         finally:
-            self._bridge.disconnect()
-            self._cursor.unlock()
+            try:
+                self._bridge.disconnect()
+            finally:
+                self._cursor.unlock()
             print("\n[INFO] Shutdown complete")
 
     def _wait_for_activation(self):
         toggle_key_name = self._config.toggle_key.name.replace("_", " ").title()
         print(
-            f"\n[LOCAL] Move to the right edge or press '{toggle_key_name}' "
+            f"\n[LOCAL] Move to the {self._config.ipad_side} edge or press '{toggle_key_name}' "
             "to enter iPad mode"
         )
 
@@ -838,6 +868,8 @@ class KVMController:
             while self._is_running and not self._activation_requested.is_set():
                 if not self._bridge.is_connected:
                     return False
+                if self._config.require_ready_on_start and not self._bridge.absolute_ready:
+                    raise RuntimeError("iPad absolute channel disconnected after changing placement")
                 if not listener.is_alive():
                     raise RuntimeError("Activation listener stopped")
                 if not self._config.edge_enabled:
@@ -847,7 +879,9 @@ class KVMController:
                 point = wintypes.POINT()
                 at_edge = (
                     _user32.GetCursorPos(ctypes.byref(point))
-                    and point.x >= right_edge - self._config.edge_margin_px
+                    and (point.x <= virtual_left + self._config.edge_margin_px
+                         if self._config.ipad_side == "left" else
+                         point.x >= right_edge - self._config.edge_margin_px)
                 )
 
                 now = time.monotonic()
@@ -897,8 +931,10 @@ class KVMController:
             top = _user32.GetSystemMetrics(77)
             height = max(1, _user32.GetSystemMetrics(79) - 1)
             self._pointer = AbsolutePointer(
+                x=32112 if self._config.ipad_side == "left" else 655,
                 y=max(0, min(32767, (point.y - top) / height * 32767)),
-                edge_enabled=self._config.mode != "locked")
+                edge_enabled=self._config.mode != "locked",
+                return_edge="right" if self._config.ipad_side == "left" else "left")
             self._absolute_dirty = True
             self._last_ack_at = 0.0
             self._unacked_since = 0.0
@@ -1002,7 +1038,7 @@ class KVMController:
                 scale = self._config.absolute_scale * self._config.sensitivity
                 if self._pointer.move(delta_x * scale, delta_y * scale,
                                       time.monotonic(), self._state.mouse_buttons):
-                    self._exit_reason = "iPad left edge"
+                    self._exit_reason = f"iPad {self._pointer.return_edge} edge"
                     self._exit_requested = True
                     return
                 self._absolute_dirty = True
@@ -1235,7 +1271,7 @@ class KVMController:
             return
         report = native.next_report()
         if native.return_requested:
-            self._exit_reason = "iPad left edge"
+            self._exit_reason = f"iPad {self._pointer.return_edge} edge"
             self._exit_requested = True
             return
         if native.failure:
@@ -1305,8 +1341,12 @@ class KVMController:
         virtual_left = _user32.GetSystemMetrics(76)  # SM_XVIRTUALSCREEN
         virtual_width = _user32.GetSystemMetrics(78)  # SM_CXVIRTUALSCREEN
         right_edge = virtual_left + virtual_width - 1
-        safe_x = min(point.x, right_edge - self._config.return_cursor_inset_px)
-        safe_x = max(virtual_left, safe_x)
+        if self._config.ipad_side == "left":
+            safe_x = max(point.x, virtual_left + self._config.return_cursor_inset_px)
+            safe_x = min(right_edge, safe_x)
+        else:
+            safe_x = min(point.x, right_edge - self._config.return_cursor_inset_px)
+            safe_x = max(virtual_left, safe_x)
         _user32.SetCursorPos(safe_x, point.y)
 
     def _type_clipboard_as_keystrokes(self):

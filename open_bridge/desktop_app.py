@@ -60,7 +60,7 @@ def make_icon():
 
 class Worker(QtCore.QThread):
     calibration_done = QtCore.Signal(str, bool, str)
-    start_handled = QtCore.Signal()
+    start_handled = QtCore.Signal(object)
 
     def __init__(self, native_edges=True, trial_seconds=0):
         super().__init__()
@@ -78,22 +78,216 @@ class Worker(QtCore.QThread):
         self.phase = ""
         self.stop_requested = False
         self.shutdown = threading.Event()
+        self.switching = False
+        self._session_lock = threading.RLock()
+        self._session_token = None
+        self._session_cancel = threading.Event()
+        self._pending_config = None
+        self._command_generation = 0
 
     def request_shutdown(self):
         self.closing = True
         self.shutdown.set()
         self.stop_bridge()
+
+    def _drain_commands_locked(self):
+        self._command_generation += 1
+        cancelled = []
         while True:
             try:
-                self.commands.get_nowait()
+                cancelled.append(self.commands.get_nowait())
             except queue.Empty:
                 break
+        if any(action == "calibrate" for action, _ in cancelled):
+            self.busy = False
+            self.phase = ""
+        return cancelled
+
+    def _notify_cancelled(self, cancelled, reason):
+        for action, value in cancelled:
+            if action == "start":
+                self.start_handled.emit(value[3] if len(value) > 3 else None)
+            elif action == "calibrate":
+                orientation = value[0] if isinstance(value, tuple) else value
+                self.calibration_done.emit(orientation, False, reason)
+
+    def _cancel_pending(self, reason):
+        with self._session_lock:
+            cancelled = self._drain_commands_locked()
+            if cancelled:
+                self.error = reason
+        self._notify_cancelled(cancelled, reason)
+
+    def request_start(self, mode, speed, ipad_side, request_token=None):
+        value = (mode, speed, ipad_side, request_token)
+        with self._session_lock:
+            if (self.closing or self.busy or self._session_token is not None
+                    or not self.monitor or not self.monitor.is_connected
+                    or not self.monitor.absolute_ready):
+                self.error = "连接已变化，请确认设备就绪后重新开启。"
+                accepted = False
+            else:
+                self.error = ""
+                self.stop_requested = False
+                self.commands.put(("start", value))
+                accepted = True
+        if not accepted:
+            self.start_handled.emit(request_token)
+        return accepted
+
+    def request_calibration(self, orientation, ipad_side):
+        with self._session_lock:
+            if (self.closing or self.busy or self._session_token is not None
+                    or not self.monitor or not self.monitor.is_connected
+                    or not self.monitor.absolute_ready):
+                accepted = False
+            else:
+                self.busy = True
+                self.commands.put(("calibrate", (orientation, ipad_side)))
+                accepted = True
+        if not accepted:
+            self.calibration_done.emit(orientation, False, "连接已变化，请确认设备就绪后重新检查。")
+        return accepted
 
     def stop_bridge(self):
-        self.stop_requested = True
-        controller = self.controller
-        if controller is not None:
-            controller.stop()
+        with self._session_lock:
+            self.stop_requested = True
+            self._session_token = None
+            self._pending_config = None
+            self.switching = False
+            self._session_cancel.set()
+            cancelled = self._drain_commands_locked()
+            if self.controller is not None:
+                self.controller.stop()
+        self._notify_cancelled(cancelled, "操作已取消。")
+
+    def request_side_change(self, mode, speed, ipad_side):
+        """Replace the next configuration without ending the user's session."""
+        with self._session_lock:
+            if self.closing or self.stop_requested or self._session_token is None:
+                return
+            self._pending_config = self._start_values((mode, speed, ipad_side))
+            self.switching = True
+            if self.controller is not None:
+                self.controller.stop()
+
+    @staticmethod
+    def _start_values(value):
+        mode, speed = value[:2]
+        side = value[2] if len(value) > 2 else "right"
+        return mode, speed, side if side in ("left", "right") else "right"
+
+    @staticmethod
+    def _board_identity(port):
+        return port.device, port.serial_number or "", getattr(port, "location", None)
+
+    def _session_active(self, token):
+        return not self.closing and not self.stop_requested and self._session_token is token
+
+    def _expire_trial(self, token):
+        with self._session_lock:
+            if self._session_active(token):
+                self.error = "本次使用时限已到，请重新开启。"
+                self.stop_bridge()
+
+    def _resume_ready(self, token, identity):
+        """Probe only after the old controller has released its serial handle."""
+        if not self._session_active(token):
+            return False
+        ports = [p for p in comports() if p.vid == 0x303A and p.pid == 0x1001]
+        if len(ports) != 1 or self._board_identity(ports[0]) != identity:
+            self.error = "开发板连接已变化，位置已保存，请确认连接后重新开启。"
+            return False
+        self.monitor = SerialBridge(BridgeConfig(port=self.port, reconnect_max_attempts=1))
+        try:
+            if not self.monitor.connect():
+                self.error = "重新连接开发板失败，位置已保存，请重新开启。"
+                return False
+            deadline = time.monotonic() + 1.5
+            while self._session_active(token) and self.monitor.is_connected:
+                if self.monitor.absolute_ready:
+                    ports = [p for p in comports() if p.vid == 0x303A and p.pid == 0x1001]
+                    if len(ports) == 1 and self._board_identity(ports[0]) == identity:
+                        return True
+                    self.error = "开发板连接已变化，位置已保存，请确认连接后重新开启。"
+                    return False
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._session_cancel.wait(min(.05, remaining))
+            if self._session_active(token):
+                self.error = "iPad 定位通道未就绪，位置已保存，请连接后重新开启。"
+            return False
+        finally:
+            self.monitor.disconnect()
+            self.monitor = None
+
+    def _run_session(self, value, identity, generation=None):
+        request_token = value[3] if len(value) > 3 else None
+        with self._session_lock:
+            if (self.closing or self.stop_requested
+                    or (generation is not None and generation != self._command_generation)):
+                self.start_handled.emit(request_token)
+                return
+            token = object()
+            self._session_token = token
+            self._session_cancel = threading.Event()
+            self._pending_config = None
+            self.switching = False
+        trial_timer = None
+        if self.trial_seconds:
+            trial_timer = threading.Timer(self.trial_seconds, lambda: self._expire_trial(token))
+            trial_timer.daemon = True
+            trial_timer.start()
+        try:
+            config_values = self._start_values(value)
+            resuming = False
+            while self._session_active(token):
+                with self._session_lock:
+                    if not self._session_active(token):
+                        break
+                    if self._pending_config is not None:
+                        config_values = self._pending_config
+                        self._pending_config = None
+                    mode, speed, side = config_values
+                    controller = KVMController(BridgeConfig(
+                        port=self.port, mode=mode, sensitivity=speed, ipad_side=side,
+                        absolute_enabled=True, native_edges_enabled=self.native_edges,
+                        require_ready_on_start=resuming,
+                        reconnect_max_attempts=1))
+                    self.controller = controller
+                    self.running_bridge = True
+                    self.switching = False
+                self.start_handled.emit(request_token)
+                try:
+                    # A new controller always starts waiting on the PC. Do not
+                    # carry over remote activation, held keys, or mouse buttons.
+                    controller.run()
+                except Exception as exc:
+                    if resuming:
+                        raise RuntimeError("切换位置后连接未就绪，位置已保存，请重新开启。") from exc
+                    raise
+                finally:
+                    controller.stop()
+                    with self._session_lock:
+                        self.controller = None
+                        self.running_bridge = False
+                with self._session_lock:
+                    if not self._session_active(token) or self._pending_config is None:
+                        break
+                if not self._resume_ready(token, identity):
+                    break
+                resuming = True
+        finally:
+            if trial_timer:
+                trial_timer.cancel()
+            with self._session_lock:
+                if self._session_token is token:
+                    self._session_token = None
+                self._pending_config = None
+                self.switching = False
+                self.running_bridge = False
+            self.start_handled.emit(request_token)
 
     def snapshot(self):
         controller = self.controller
@@ -103,6 +297,7 @@ class Worker(QtCore.QThread):
             "ble": bool(bridge and bridge.ble_connected),
             "ready": bool(bridge and bridge.absolute_ready),
             "remote": bool(controller and controller._is_active),
+            "switching": self.switching,
         }
 
     def run(self):
@@ -124,7 +319,9 @@ class Worker(QtCore.QThread):
         if len(ports) != 1:
             self.port = ""
             self.device_serial = ""
-            self.error = "检测到多个开发板，请仅连接本次使用的一个。" if ports else ""
+            if ports:
+                self.error = "检测到多个开发板，请仅连接本次使用的一个。"
+            self._cancel_pending("开发板连接已变化，请确认连接后重新开启。")
             self.shutdown.wait(.4)
             return
         self.port = ports[0].device
@@ -133,78 +330,69 @@ class Worker(QtCore.QThread):
         self.monitor = SerialBridge(config)
         if not self.monitor.connect():
             self.error = "设备正被其他程序使用，请先关闭旧版键鼠桥。"
+            self._cancel_pending(self.error)
             self.shutdown.wait(.4)
             return
-        self.error = ""
         while not self.closing and self.monitor.is_connected:
-            try:
-                action, value = self.commands.get(timeout=.15)
-            except queue.Empty:
+            with self._session_lock:
+                try:
+                    action, value = self.commands.get_nowait()
+                except queue.Empty:
+                    action = None
+                generation = self._command_generation
+            if action is None:
+                self.shutdown.wait(.05)
                 continue
             self.error = ""
             if action == "start":
-                if self.closing or self.stop_requested:
+                request_token = value[3] if len(value) > 3 else None
+                if (self.closing or self.stop_requested
+                        or generation != self._command_generation):
                     self.error = "已取消开启。"
-                    self.start_handled.emit()
+                    self.start_handled.emit(request_token)
                     continue
-                if not self.monitor.absolute_ready:
+                if not self.monitor.is_connected or not self.monitor.absolute_ready:
                     self.error = "请先连接 iPad，并确认使用新版定位固件。"
-                    self.start_handled.emit()
+                    self.start_handled.emit(request_token)
                     continue
                 self.monitor.disconnect()
                 self.monitor = None
-                mode, speed = value
-                self.controller = KVMController(BridgeConfig(
-                    port=self.port, mode=mode, sensitivity=speed,
-                    absolute_enabled=True, native_edges_enabled=self.native_edges,
-                    reconnect_max_attempts=1))
-                if self.closing or self.stop_requested:
-                    self.controller.stop()
-                    self.controller = None
-                    return
-                self.running_bridge = True
-                self.start_handled.emit()
-                trial_timer = None
-                if self.trial_seconds:
-                    trial_timer = threading.Timer(self.trial_seconds, self.stop_bridge)
-                    trial_timer.daemon = True
-                    trial_timer.start()
-                try:
-                    self.controller.run()
-                finally:
-                    if trial_timer:
-                        trial_timer.cancel()
-                    self.controller.stop()
-                    self.controller = None
-                    self.running_bridge = False
+                self._run_session(value, self._board_identity(ports[0]), generation)
                 return
             if action == "calibrate":
-                if self.closing:
-                    return
                 self.busy = True
                 success, detail = False, ""
+                orientation, side = value if isinstance(value, tuple) else (value, "right")
+                labels = POINT_LABELS[:]
+                if side == "left":
+                    labels[1:4] = ["右侧约 90%", "最右边缘", "左侧约 10%"]
                 try:
-                    if not self.monitor.absolute_ready:
+                    if not self.monitor.is_connected or not self.monitor.absolute_ready:
                         raise RuntimeError("iPad 定位通道尚未连接。")
                     for i, (_, x, y) in enumerate(POINTS):
-                        if self.closing:
+                        if self.closing or generation != self._command_generation:
                             raise RuntimeError("检查已取消。")
-                        self.phase = f"{i + 1} / 7 · {POINT_LABELS[i]}"
+                        self.phase = f"{i + 1} / 7 · {labels[i]}"
+                        if side == "left" and x != 16384:
+                            x = 32767 - x
                         if not self.monitor.send_absolute_report(0, x, y, 0, i + 1):
                             raise RuntimeError("设备连接已断开。")
                         deadline = time.monotonic() + 2.5
                         while time.monotonic() < deadline and not self.closing:
+                            if generation != self._command_generation:
+                                raise RuntimeError("检查已取消。")
                             if not self.monitor.absolute_ready:
                                 raise RuntimeError("iPad 蓝牙连接已断开。")
                             self.shutdown.wait(.05)
-                    success = not self.closing
+                    success = not self.closing and generation == self._command_generation
                 except Exception as exc:
                     detail = str(exc)
                 finally:
                     self.monitor.send_mouse_report(0, 0, 0, 0)
                     self.busy = False
                     self.phase = ""
-                    self.calibration_done.emit(value, success, detail)
+                    self.calibration_done.emit(orientation, success, detail)
+        self._cancel_pending("开发板连接已断开，请重新连接后开启或检查。")
 
 
 class ModeCard(W.QFrame):
@@ -221,10 +409,10 @@ class ModeCard(W.QFrame):
         tag = W.QLabel(badge)
         tag.setObjectName("tag")
         layout.addWidget(tag)
-        text = W.QLabel(description)
-        text.setWordWrap(True)
-        text.setObjectName("muted")
-        layout.addWidget(text)
+        self.description = W.QLabel(description)
+        self.description.setWordWrap(True)
+        self.description.setObjectName("muted")
+        layout.addWidget(self.description)
         layout.addStretch()
         self.hotkey_toggle = None
         if key == "free":
@@ -267,12 +455,13 @@ class Window(W.QMainWindow):
         self.flash_dialog = None
         self.save_error = ""
         self.start_pending = False
+        self.start_request = None
         self.config_path = app_data() / "settings.json"
         self.settings = migrate_settings({} if preview else read_json(self.config_path, {}))
-        self.seed = read_json(Path(__file__).with_name("device-calibration.json"), {})
+        self.check_side = self.settings["ipad_side"]
         self.setWindowTitle("MouseLink · 原生边缘候选版" if candidate else "MouseLink · 键鼠桥")
         self.setWindowIcon(make_icon())
-        self.resize(1000, 800)
+        self.resize(1000, 880)
         self.setMinimumSize(820, 520)
         scroll = W.QScrollArea()
         scroll.setWidgetResizable(True)
@@ -304,9 +493,9 @@ class Window(W.QMainWindow):
         hero.setObjectName("hero")
         hero_layout = W.QVBoxLayout(hero)
         hero_layout.setContentsMargins(26, 24, 26, 24)
-        route = W.QLabel("WINDOWS     ⇄     iPAD")
-        route.setObjectName("route")
-        hero_layout.addWidget(route)
+        self.route = W.QLabel("WINDOWS     ⇄     iPAD")
+        self.route.setObjectName("route")
+        hero_layout.addWidget(self.route)
         self.headline = W.QLabel("一套键鼠，自由往返。")
         self.headline.setObjectName("headline")
         hero_layout.addWidget(self.headline)
@@ -314,6 +503,40 @@ class Window(W.QMainWindow):
         self.subtitle.setWordWrap(True)
         hero_layout.addWidget(self.subtitle)
         root.addWidget(hero)
+
+        placement = W.QFrame()
+        placement.setObjectName("panel")
+        placement_layout = W.QVBoxLayout(placement)
+        placement_layout.setContentsMargins(22, 16, 22, 16)
+        placement_layout.setSpacing(12)
+        placement_header = W.QHBoxLayout()
+        placement_title = W.QLabel("iPad 摆放位置")
+        placement_title.setObjectName("section")
+        placement_header.addWidget(placement_title)
+        placement_header.addStretch()
+        placement_hint = W.QLabel("运行中也可一键切换")
+        placement_hint.setObjectName("muted")
+        placement_header.addWidget(placement_hint)
+        placement_layout.addLayout(placement_header)
+        placement_buttons = W.QHBoxLayout()
+        placement_buttons.setSpacing(12)
+        self.side_group = W.QButtonGroup(self)
+        self.side_buttons = {}
+        for side, text in (("left", "iPad 在电脑左侧"), ("right", "iPad 在电脑右侧")):
+            button = W.QPushButton(text)
+            button.setObjectName("sideChoice")
+            button.setCheckable(True)
+            button.setMinimumHeight(44)
+            button.setAccessibleName(text)
+            button.setToolTip("切换时先返回电脑，再从所选边缘进入 iPad。")
+            self.side_group.addButton(button)
+            self.side_buttons[side] = button
+            placement_buttons.addWidget(button, 1)
+        self.side_buttons[self.settings["ipad_side"]].setChecked(True)
+        for side, button in self.side_buttons.items():
+            button.clicked.connect(lambda checked, side=side: self.side_changed(side))
+        placement_layout.addLayout(placement_buttons)
+        root.addWidget(placement)
 
         section = W.QHBoxLayout()
         label = W.QLabel("选择切换方式")
@@ -375,6 +598,7 @@ class Window(W.QMainWindow):
         instructions.setWordWrap(True)
         footer.addWidget(instructions, 1)
         self.check_button = W.QPushButton("检查光标位置")
+        self.check_button.setToolTip("可选检查：光标位置异常时使用，不影响开启键鼠桥。")
         self.check_button.clicked.connect(self.choose_calibration)
         footer.addWidget(self.check_button)
         root.addLayout(footer)
@@ -426,23 +650,36 @@ class Window(W.QMainWindow):
     def effective_mode(self):
         return bridge_mode(self.selected_mode(), self.hotkey_toggle.isChecked())
 
-    def clear_start_pending(self):
-        self.start_pending = False
+    def selected_side(self):
+        return "left" if self.side_buttons["left"].isChecked() else "right"
 
-    def calibrated(self):
-        if self.preview:
-            return True
-        serial = self.worker.device_serial
-        profile = self.settings.get("calibration", {})
-        if profile.get("device_serial") != serial:
-            profile = self.seed if self.seed.get("device_serial") == serial else {}
-        return bool(serial and profile.get("landscape") and profile.get("portrait"))
+    def side_changed(self, side):
+        if self.closing or self.flash_open_pending or self.flash_dialog:
+            return
+        if self.settings["ipad_side"] == side:
+            return
+        self.side_buttons[side].setChecked(True)
+        self.settings["ipad_side"] = side
+        self.save()
+        if self.worker and (self.worker.running_bridge or self.worker.switching):
+            self.worker.request_side_change(self.effective_mode(), self.speed.value() / 100, side)
+        self.refresh()
+
+    def return_description(self):
+        edge = "右" if self.selected_side() == "left" else "左"
+        return f"从 iPad 最{edge}边缘继续向{edge}推动，即可返回电脑。"
+
+    def clear_start_pending(self, request):
+        if request is self.start_request:
+            self.start_pending = False
+            self.start_request = None
 
     def save(self):
         if self.preview:
             return
         self.settings.update(mode=self.selected_mode(), speed=self.speed.value(),
-                             hotkey_return_enabled=self.hotkey_toggle.isChecked())
+                             hotkey_return_enabled=self.hotkey_toggle.isChecked(),
+                             ipad_side=self.selected_side())
         try:
             temp = self.config_path.with_suffix(".tmp")
             temp.write_text(json.dumps(self.settings, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -455,19 +692,30 @@ class Window(W.QMainWindow):
     def toggle_bridge(self):
         if self.preview or self.closing or self.flash_open_pending or self.flash_dialog:
             return
-        if self.worker.running_bridge or self.start_pending:
+        if self.worker.running_bridge or self.worker.switching or self.start_pending:
             self.worker.stop_bridge()
+            self.start_pending = False
+            self.start_request = None
+            self.refresh()
+            return
+        if self.worker.busy or not self.worker.snapshot()["ready"]:
             return
         self.save()
         self.start_pending = True
-        self.worker.stop_requested = False
-        self.worker.commands.put(("start", (self.effective_mode(), self.speed.value() / 100)))
+        self.start_request = object()
+        self.worker.error = ""
+        self.worker.request_start(self.effective_mode(), self.speed.value() / 100,
+                                  self.selected_side(), self.start_request)
         self.refresh()
 
     def choose_calibration(self):
+        if (self.preview or self.closing or self.flash_open_pending or self.flash_dialog
+                or self.start_pending or self.worker.running_bridge or self.worker.switching
+                or self.worker.busy or not self.worker.snapshot()["ready"]):
+            return
         box = W.QMessageBox(self)
         box.setWindowTitle("检查光标位置")
-        box.setText("保持 iPad 解锁，横屏与竖屏各检查一次。")
+        box.setText("光标位置异常时，可按需检查横屏或竖屏。")
         box.setInformativeText("请先把 iPad 转到要检查的方向并解锁。光标将经过七个位置，全程不会点击。")
         landscape = box.addButton("检查横屏", W.QMessageBox.ButtonRole.ActionRole)
         portrait = box.addButton("检查竖屏", W.QMessageBox.ButtonRole.ActionRole)
@@ -475,8 +723,8 @@ class Window(W.QMainWindow):
         box.exec()
         if self.worker and box.clickedButton() in (landscape, portrait):
             orientation = "landscape" if box.clickedButton() == landscape else "portrait"
-            self.worker.busy = True
-            self.worker.commands.put(("calibrate", orientation))
+            self.check_side = self.selected_side()
+            self.worker.request_calibration(orientation, self.check_side)
             self.refresh()
 
     def finish_calibration(self, orientation, success, detail):
@@ -487,8 +735,10 @@ class Window(W.QMainWindow):
         if not success:
             W.QMessageBox.warning(self, "检查未完成", detail or "连接已中断，请重新检查。")
             return
+        edge, other = ("右", "左") if self.check_side == "left" else ("左", "右")
         answer = W.QMessageBox.question(self, "确认光标位置",
-            "七个位置是否全部正确，第三步真正贴住最左边缘？\n\n中心 → 左侧 → 最左边缘 → 右侧 → 上方 → 下方 → 中心",
+            f"七个位置是否全部正确，第三步真正贴住最{edge}边缘？\n\n"
+            f"中心 → {edge}侧 → 最{edge}边缘 → {other}侧 → 上方 → 下方 → 中心",
             W.QMessageBox.StandardButton.Yes | W.QMessageBox.StandardButton.No)
         profile = self.settings.get("calibration", {}).copy()
         if profile.get("device_serial") != self.worker.device_serial:
@@ -505,10 +755,14 @@ class Window(W.QMainWindow):
             return
         state = {"usb": True, "ble": True, "ready": True, "remote": False} if self.preview else self.worker.snapshot()
         running = False if self.preview else self.worker.running_bridge
+        switching = False if self.preview else self.worker.switching
         busy = False if self.preview else self.worker.busy
         error = "" if self.preview else self.worker.error
-        if running or error:
-            self.start_pending = False
+        side_label = "左" if self.selected_side() == "left" else "右"
+        return_label = "右" if self.selected_side() == "left" else "左"
+        self.route.setText("iPAD     ⇄     WINDOWS" if self.selected_side() == "left"
+                           else "WINDOWS     ⇄     iPAD")
+        self.cards["free"].description.setText(self.return_description())
         if state["ready"]:
             self.connection.setText("●  开发板与 iPad 已连接")
         elif state["ble"]:
@@ -517,38 +771,46 @@ class Window(W.QMainWindow):
             self.connection.setText("●  开发板已连接 · 等待 iPad")
         else:
             self.connection.setText("○  等待连接开发板")
-        if busy:
+        if switching:
+            self.headline.setText("正在切换位置…")
+            self.subtitle.setText(f"正在释放键鼠并应用左侧位置，完成后从电脑左边缘进入。" if side_label == "左"
+                                  else "正在释放键鼠并应用右侧位置，完成后从电脑右边缘进入。")
+        elif busy:
             self.headline.setText("正在检查光标位置")
             self.subtitle.setText(self.worker.phase or "请观察 iPad 屏幕…")
         elif running:
             self.headline.setText("正在控制 iPad" if state["remote"] else "已开启，随时出发。")
-            self.subtitle.setText(MODES[self.selected_mode()][2] if state["remote"] else "把鼠标推到电脑最右边缘，稍停即可进入 iPad。")
+            self.subtitle.setText((self.return_description() if self.selected_mode() == "free"
+                                   else MODES["locked"][2]) if state["remote"]
+                                  else f"把鼠标推到电脑最{side_label}边缘，稍停即可进入 iPad。")
         else:
             self.headline.setText("一套键鼠，自由往返。")
-            self.subtitle.setText("从电脑右边缘进入 iPad，让操作自然延续。")
-        self.start_button.setText("停止键鼠桥" if running else "正在开启…" if self.start_pending else "开启键鼠桥")
-        self.start_button.setEnabled(not busy and not self.start_pending and (running or (state["ready"] and self.calibrated())))
-        self.check_button.setEnabled(state["ready"] and not running and not busy and not self.start_pending)
+            self.subtitle.setText(f"从电脑{side_label}边缘进入 iPad，让操作自然延续。")
+        self.start_button.setText("停止键鼠桥" if running or switching else "取消开启" if self.start_pending else "开启键鼠桥")
+        self.start_button.setEnabled(not busy and (running or switching or self.start_pending or state["ready"]))
+        self.check_button.setEnabled(state["ready"] and not running and not switching and not busy and not self.start_pending)
         self.flash_button.setEnabled(not busy and not self.start_pending)
+        for button in self.side_buttons.values():
+            button.setEnabled(not busy and not self.start_pending)
         for card in self.cards.values():
-            card.setEnabled(not running and not busy and not self.start_pending)
-        self.speed.setEnabled(not running and not busy and not self.start_pending)
-        self.hotkey_toggle.setEnabled(self.selected_mode() == "free" and not running and not busy and not self.start_pending)
+            card.setEnabled(not running and not switching and not busy and not self.start_pending)
+        self.speed.setEnabled(not running and not switching and not busy and not self.start_pending)
+        self.hotkey_toggle.setEnabled(self.selected_mode() == "free" and not running and not switching and not busy and not self.start_pending)
         if error:
             detail = error
+        elif switching:
+            detail = "切换完成后自动恢复待机；点击停止可取消。"
         elif not state["usb"]:
             detail = "请用支持数据传输的 USB 线连接开发板。"
         elif not state["ble"]:
             detail = "请在 iPad 蓝牙设置中连接 MouseLink-iPad。"
         elif not state["ready"]:
             detail = "需要新版定位固件。刚升级后，可忽略旧设备并重新配对。"
-        elif not self.calibrated():
-            detail = "首次使用请完成横屏、竖屏的光标位置检查。"
         else:
-            detail = "横竖屏定位已确认 · 切换方向后无需更换模式。"
+            detail = "连接已就绪，可直接开启；光标异常时可按需检查位置。"
         self.status_text.setText(detail)
         self.notice.setText(self.save_error or ("锁定模式：边缘不返回；Ctrl + 左 Alt 返回电脑。" if self.selected_mode() == "locked"
-            else "自由返回：先到达 iPad 最左边缘，再继续向左推动；按住鼠标拖动时留在 iPad。"))
+            else f"自由返回：先到达 iPad 最{return_label}边缘，再继续向{return_label}推动；按住鼠标拖动时留在 iPad。"))
 
     def open_flash(self):
         if self.flash_dialog or self.flash_open_pending or self.closing:
@@ -557,6 +819,7 @@ class Window(W.QMainWindow):
         self.flash_open_pending = True
         self.centralWidget().setEnabled(False)
         self.start_pending = False
+        self.start_request = None
         self.start_button.setEnabled(False)
         self.flash_button.setEnabled(False)
         self.check_button.setEnabled(False)
@@ -619,6 +882,7 @@ class Window(W.QMainWindow):
         self.closing = True
         self.flash_open_pending = False
         self.start_pending = False
+        self.start_request = None
         self.save()
         if self.worker:
             self.worker.request_shutdown()
@@ -654,6 +918,8 @@ QPushButton#primary { background: #2869e8; color: white; border: none; font-weig
 QPushButton#primary:hover { background: #1656cd; }
 QPushButton#hotkeyToggle { padding: 7px 12px; font-size: 12px; border-radius: 13px; }
 QPushButton#hotkeyToggle:checked { background: #2869e8; border-color: #2869e8; color: white; }
+QPushButton#sideChoice { font-weight: 600; }
+QPushButton#sideChoice:checked { background: #eaf2ff; border: 2px solid #3875e8; color: #225cbb; }
 QComboBox { background: white; border: 1px solid #d4ddeb; padding: 10px; border-radius: 8px; }
 QProgressBar { border: none; background: #e0e8f5; border-radius: 5px; min-height: 15px; text-align: center; }
 QProgressBar::chunk { background: #3778ec; border-radius: 5px; }
@@ -673,7 +939,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--preview", type=Path)
     parser.add_argument("--width", type=int, default=1000)
-    parser.add_argument("--height", type=int, default=800)
+    parser.add_argument("--height", type=int, default=880)
     parser.add_argument("--native-edges", action="store_true",
                         help="Run the isolated, time-limited native-edge candidate")
     parser.add_argument("--trial-seconds", type=float, default=180,

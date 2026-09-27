@@ -11,8 +11,8 @@ from bridge import BridgeConfig, KVMController, mouse
 
 
 class NativeEdgeTests(unittest.TestCase):
-    def native(self, x=16384, y=16384, sensitivity=0.5):
-        n = NativeEdges(AbsolutePointer(x=x, y=y), sensitivity)
+    def native(self, x=16384, y=16384, sensitivity=0.5, return_edge="left"):
+        n = NativeEdges(AbsolutePointer(x=x, y=y, return_edge=return_edge), sensitivity)
         self.transmit(n, 1, acknowledge=True)
         return n
 
@@ -341,6 +341,95 @@ class NativeEdgeTests(unittest.TestCase):
         resync = self.transmit(n, 2.3, acknowledge=True)
         self.assertEqual((resync.channel, resync.x), ("absolute", 16400))
         self.assertIsNone(n.next_report())
+
+    def test_left_placement_native_edges_and_corner_are_mirrored(self):
+        for x, y, dx, dy, edges in [
+            (100, 16, 0, -4, ("top",)),
+            (16, 100, -4, 0, ("left",)),
+            (16, 16, -4, -4, ("left", "top")),
+            (16, 32751, -4, 4, ("left", "bottom")),
+        ]:
+            with self.subTest(edges=edges):
+                n = self.native(x, y, return_edge="right")
+                n.move(dx, dy, 2)
+                edge = self.transmit(n, acknowledge=True)
+                self.assertEqual(n.edges, edges)
+                self.assertEqual(n.state, "relative")
+                if "left" in edges:
+                    self.assertEqual(edge.x, 0)
+                tail = self.transmit(n, 2.02)
+                self.assertEqual(tail.channel, "relative")
+                self.assertLessEqual(tail.x, 0)
+                self.assertEqual(tail.y > 0, dy > 0)
+
+    def test_right_corner_horizontal_push_returns_and_vertical_intent_is_native(self):
+        n = self.native(x=32767, y=0, return_edge="right")
+        n.move(2, -1, 2)
+        self.assertIsNone(n.next_report())
+        self.assertTrue(n.return_requested)
+        self.assertEqual(n.state, "absolute")
+        for y, dy in [(0, -100), (32767, 100), (0, -1), (32767, 1)]:
+            with self.subTest(y=y, dy=dy):
+                n = self.native(x=32767, y=y, return_edge="right")
+                n.move(1, dy, 2)
+                edge = self.transmit(n, 2)
+                self.assertFalse(n.return_requested)
+                self.assertEqual((n.state, edge.barrier), ("edge_wait", "edge"))
+
+    def test_native_left_edge_resyncs_after_inward_motion_with_original_signs(self):
+        n = self.native(x=0, return_edge="right")
+        n.move(-2, 0, 2)
+        self.transmit(n, 2, acknowledge=True)
+        relative = self.transmit(n, 2.02)
+        self.assertEqual((relative.channel, relative.x), ("relative", -1))
+        n.move(2, 0, 2.1)
+        relative = self.transmit(n, 2.1)
+        self.assertEqual((relative.channel, relative.x), ("relative", 1))
+        n.move(10, 0, 2.2)
+        resync = self.transmit(n, 2.2, acknowledge=True)
+        self.assertEqual((resync.channel, resync.barrier, resync.x),
+                         ("absolute", "resync", 192))
+        self.assertEqual(n.state, "absolute")
+
+    def test_right_return_requires_fresh_ack_after_leaving_native_channel(self):
+        n = self.native(x=32767, y=100, return_edge="right")
+        old_seq = n._sequence
+        n.move(0, -10, 2)
+        self.transmit(n, 2, acknowledge=True)
+        n.acknowledge(old_seq, 32767, 100, 0, True, 2.1)
+        n.move(100, -2, 2.2)
+        self.transmit(n, 2.3)
+        self.assertFalse(n.return_requested)
+        self.assertIsNone(n.pointer.edge_sent_at)
+        n.move(0, 12, 2.4)
+        resync = self.transmit(n, 2.5)
+        n.move(1, 0, 2.51)
+        n.acknowledge(n._waiting_sequence, resync.x, resync.y, 0, True, 2.6)
+        self.transmit(n, 2.8)
+        self.assertFalse(n.return_requested)
+        n.move(1, 0, 2.81)
+        self.assertIsNone(n.next_report())
+        self.assertTrue(n.return_requested)
+
+    def test_right_return_drag_requires_release_ack_and_locked_mode_stays_remote(self):
+        n = self.native(x=32767, return_edge="right")
+        n.button(1, 2)
+        n.move(20, 0, 2.1)
+        self.transmit(n, 2.2, acknowledge=True)
+        self.transmit(n, 2.3, acknowledge=True)
+        self.assertFalse(n.return_requested)
+        n.button(0, 2.4)
+        n.move(20, 0, 2.5)
+        self.transmit(n, 2.6, acknowledge=True)
+        self.assertFalse(n.return_requested)
+        n.move(20, 0, 2.9)
+        self.assertIsNone(n.next_report())
+        self.assertTrue(n.return_requested)
+        locked = self.native(x=32767, return_edge="right")
+        locked.pointer.edge_enabled = False
+        locked.move(20, 0, 2)
+        self.assertEqual(self.transmit(locked).channel, "absolute")
+        self.assertFalse(locked.return_requested)
 
 
 class ControllerNativeEdgeTests(unittest.TestCase):

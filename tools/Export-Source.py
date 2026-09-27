@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # Deliberately list files rather than copying whole working directories.
 SOURCE_FILES = (
     ".gitattributes", ".gitignore", "CHANGELOG.md", "LICENSE",
-    "README.md", "README.zh-CN.md", "启动MouseLink.cmd",
+    "README.md", "README.zh-CN.md", "启动MouseLink.cmd", "启动MouseLink开发版.cmd",
     "open_bridge/absolute_diagnostic.py", "open_bridge/absolute_protocol.py",
     "open_bridge/app_settings.py", "open_bridge/app_version.py", "open_bridge/bridge.py",
     "open_bridge/desktop_app.py", "open_bridge/device-calibration.json",
@@ -29,13 +29,14 @@ SOURCE_FILES = (
     "open_bridge/main/src/hid_report_transport.c", "open_bridge/main/src/uart_proto.c",
     "tests/test_bridge_protocol.py", "tests/test_firmware_build.py", "tests/test_firmware_flash.py",
     "tests/test_native_desktop.py", "tests/test_native_edges.py", "tests/test_native_trial.py",
+    "tests/test_placement_controller.py", "tests/test_placement_desktop.py", "tests/test_side_switch_worker.py",
     "tests/test_pointer_boundary.py", "tests/test_serial_reader.py", "tests/test_source_export.py",
     "tests/test_unified_modes.py", "tests/test_uart_proto.c",
     "tools/Build-Desktop.ps1", "tools/Build-Firmware.ps1", "tools/Build-Installer.ps1",
     "tools/build_firmware_bundle.py", "tools/Collect-Licenses.py", "tools/Export-Source.py",
     "tools/MouseLink.spec", "tools/MouseLink.iss", "tools/Package-Release.py",
     "tools/check_desktop_101.py",
-    "tools/render_desktop_101.py", "tools/Test-UartProtocol.ps1",
+    "tools/render_desktop_101.py", "tools/render_placement.py", "tools/Test-UartProtocol.ps1",
     "tools/release-data/device-calibration.json", "open_bridge/licenses/flash-runtime.json",
 )
 

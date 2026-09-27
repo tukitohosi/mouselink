@@ -1,5 +1,13 @@
 # Changelog / 更新记录
 
+## 1.0.3
+
+- Make pointer-position checks optional, including first use and changed boards. / 取消首次及后续使用的强制横竖屏检查，保留可选排查入口。
+- Remember left/right iPad placement, with matching entry, return and edge gestures. / 新增左右摆放按钮并记住选择，同步切换进入、返回及边缘操作方向。
+- Switch placement while running by releasing input and restarting in local standby. Stop, close, flashing or failed reconnection cancels resumption. / 运行中换边先释放键鼠，再恢复本地待机；停止、关闭、刷机或重连失败会取消自动恢复。
+- Reuse the existing v3 firmware; this update needs no board reflash. / 沿用现有 v3 固件，此次更新无需重刷开发板。
+- The user accepted this version on their device. Keep 1.0.2 for rollback; the intermittent Dock limitation remains. / 用户已完成本机实机验收，保留 1.0.2 用于回退；Dock 偶发问题仍存在。
+
 ## 1.0.2
 
 - Enable the restored mixed absolute/relative mouse implementation in normal desktop use, without a session timer. / 日常入口启用已回退确认的混合鼠标逻辑，不限使用时长。

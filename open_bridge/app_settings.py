@@ -9,6 +9,7 @@ def migrate_settings(value):
         else settings.get("hotkey_return_enabled") is True
     )
     settings["mode"] = "locked" if old == "locked" else "free"
+    settings["ipad_side"] = "left" if settings.get("ipad_side") == "left" else "right"
     try:
         settings["speed"] = max(25, min(150, int(settings.get("speed", 50))))
     except (ValueError, TypeError, OverflowError):

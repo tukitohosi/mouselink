@@ -11,10 +11,12 @@ from absolute_protocol import Status
 
 
 class UnifiedModeTests(unittest.TestCase):
-    def controller(self, mode):
-        controller = KVMController(BridgeConfig(mode=mode, absolute_enabled=True))
+    def controller(self, mode, side="right"):
+        controller = KVMController(BridgeConfig(mode=mode, absolute_enabled=True, ipad_side=side))
         controller._is_active = True
-        controller._pointer = AbsolutePointer(x=160, edge_enabled=mode != "locked")
+        controller._pointer = AbsolutePointer(x=32607 if side == "left" else 160,
+                                              edge_enabled=mode != "locked",
+                                              return_edge="right" if side == "left" else "left")
         controller._bridge = Mock()
         controller._bridge.status = Status()
         controller._bridge.send_absolute_report.return_value = True
@@ -22,28 +24,32 @@ class UnifiedModeTests(unittest.TestCase):
 
     def test_edge_and_mixed_require_ble_confirmation_and_fresh_push(self):
         for mode in ("edge", "mixed"):
-            c = self.controller(mode)
-            c._handle_raw_mouse_move(-20, 0)
-            self.assertFalse(c._exit_requested)
-            self.assertEqual(c._pointer.x, 0)
-            self.assertIsNone(c._pointer.edge_sent_at)
-            seq = c._sequence
-            ack_time = time.monotonic()
-            c._bridge.status = Status(ack_sequence=seq, ack_accepted=True,
-                                      ack_x=0, ack_y=16384, ack_at=ack_time)
-            c._confirm_absolute_edge()
-            c._handle_raw_mouse_move(-20, 0)
-            self.assertFalse(c._exit_requested)
-            with patch("bridge.time.monotonic", return_value=ack_time + .2):
-                c._handle_raw_mouse_move(-20, 0)
-            self.assertTrue(c._exit_requested)
+            for side, x, dx in [("right", 0, -20), ("left", 32767, 20)]:
+                with self.subTest(mode=mode, side=side):
+                    c = self.controller(mode, side)
+                    c._handle_raw_mouse_move(dx, 0)
+                    self.assertFalse(c._exit_requested)
+                    self.assertEqual(c._pointer.x, x)
+                    self.assertIsNone(c._pointer.edge_sent_at)
+                    seq = c._sequence
+                    ack_time = time.monotonic()
+                    c._bridge.status = Status(ack_sequence=seq, ack_accepted=True,
+                                              ack_x=x, ack_y=16384, ack_at=ack_time)
+                    c._confirm_absolute_edge()
+                    c._handle_raw_mouse_move(dx, 0)
+                    self.assertFalse(c._exit_requested)
+                    with patch("bridge.time.monotonic", return_value=ack_time + .2):
+                        c._handle_raw_mouse_move(dx, 0)
+                    self.assertTrue(c._exit_requested)
 
     def test_locked_mode_ignores_confirmed_edge(self):
-        c = self.controller("locked")
-        c._pointer.x = 0
-        c._pointer.sent(0, 16384, time.monotonic() - 1, True)
-        c._handle_raw_mouse_move(-100, 0)
-        self.assertFalse(c._exit_requested)
+        for side, x, dx in [("right", 0, -100), ("left", 32767, 100)]:
+            with self.subTest(side=side):
+                c = self.controller("locked", side)
+                c._pointer.x = x
+                c._pointer.sent(x, 16384, time.monotonic() - 1, True)
+                c._handle_raw_mouse_move(dx, 0)
+                self.assertFalse(c._exit_requested)
 
     def test_standalone_chord_only_exits_modes_that_enable_it(self):
         for mode in ("edge", "mixed", "locked"):

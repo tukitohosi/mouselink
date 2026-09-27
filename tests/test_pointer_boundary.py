@@ -69,6 +69,61 @@ class BoundaryTests(unittest.TestCase):
         p.acknowledge(7, 0, 16384, 0, True, 1.3)
         self.assertFalse(p.move(-30, 0, 1.6))
 
+    def test_both_return_edges_require_a_later_push_after_matching_ack(self):
+        for edge, x, dx in [("left", 0, -100), ("right", 32767, 100)]:
+            with self.subTest(edge=edge):
+                p = AbsolutePointer(x=16384, return_edge=edge)
+                self.assertFalse(p.move(dx * 1000, 0, 1))
+                self.assertEqual(p.x, x)
+                p.submitted(7, x, 16384, 1.1, True)
+                self.assertFalse(p.move(dx, 0, 1.3))
+                p.acknowledge(7, x, 16384, 0, True, 1.4)
+                self.assertFalse(p.move(dx, 0, 1.5))
+                self.assertTrue(p.move(dx, 0, 1.6))
+
+    def test_other_edge_and_inward_motion_never_return(self):
+        for edge, x, outward in [("left", 32767, 10), ("right", 0, -10)]:
+            with self.subTest(edge=edge):
+                p = AbsolutePointer(x=x, return_edge=edge)
+                p.submitted(1, x, 16384, 1, True)
+                p.acknowledge(1, x, 16384, 0, True, 1.1)
+                self.assertFalse(p.move(outward, 0, 2))
+                p.x = p.return_x
+                p.sent(p.return_x, 16384, 2, True)
+                self.assertFalse(p.move(outward, 0, 3))
+                self.assertIsNone(p.edge_sent_at)
+
+    def test_right_edge_drag_locked_and_moving_away_disarm_return(self):
+        p = AbsolutePointer(x=32767, return_edge="right")
+        p.sent(32767, 16384, 1, True)
+        self.assertFalse(p.move(10, 0, 2, buttons=1))
+        self.assertFalse(p.move(10, 0, 3))
+        p.sent(32767, 16384, 3, True)
+        self.assertFalse(p.move(-10, 0, 4))
+        self.assertFalse(p.move(10, 0, 5))
+        self.assertIsNone(p.edge_sent_at)
+        p.edge_enabled = False
+        p.sent(32767, 16384, 5, True)
+        self.assertFalse(p.move(10, 0, 6))
+
+    def test_right_edge_rejects_wrong_stale_and_previous_visit_ack(self):
+        for sequence, x, buttons, accepted, at in [
+            (8, 32767, 0, True, 1.1), (7, 0, 0, True, 1.1),
+            (7, 32767, 1, True, 1.1), (7, 32767, 0, False, 1.1),
+            (7, 32767, 0, True, .9), (7, 32767, 0, True, 1.8),
+        ]:
+            with self.subTest(sequence=sequence, x=x, buttons=buttons, at=at):
+                p = AbsolutePointer(x=32767, return_edge="right")
+                p.submitted(7, 32767, 16384, 1, True)
+                p.acknowledge(sequence, x, 16384, buttons, accepted, at)
+                self.assertFalse(p.move(10, 0, 2))
+        p = AbsolutePointer(x=32767, return_edge="right")
+        p.submitted(7, 32767, 16384, 1, True)
+        p.move(-10, 0, 1.1)
+        p.move(10, 0, 1.2)
+        p.acknowledge(7, 32767, 16384, 0, True, 1.3)
+        self.assertFalse(p.move(10, 0, 1.6))
+
 
 if __name__ == "__main__":
     unittest.main()
