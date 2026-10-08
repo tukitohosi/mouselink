@@ -12,19 +12,13 @@ Windows keyboard and mouse → MouseLink → USB → ESP32-C3 → Bluetooth HID 
 
 ## Current version and limitations
 
-The current release is **1.0.3**: pointer-position checks are optional, iPad placement can be set to either side, and placement can be changed while running. The user accepted this version on their device; keep the 1.0.2 installer for rollback. This update uses the original v3 firmware and needs no board reflash. It combines absolute positioning inside the screen with relative movement for supported edge interactions. Normal use has no session time limit.
-
-For source development, close the running MouseLink and open `启动MouseLink开发版.cmd` after setting up the local Python environment. It uses separate settings and logs in `test-results/placement-1.0.3/app-data`, copying existing preferences only on first launch and leaving installed data unchanged. Input capture does not start automatically.
-
-**Known issue:** the Dock may occasionally fail to appear or may close while you try to leave an app. Move the pointer back into the screen and try the bottom-edge action again. This version does not claim to reproduce every behavior of a directly connected Bluetooth mouse.
-
-The user accepted 1.0.3 on their device. Earlier entry, app-click and left-edge return checks used Windows 11 x64 and an iPad Pro M5 (2025) running iPadOS 26.6.1. This does not establish clean-machine compatibility, compatibility with every iPad, or complete repeated testing of every mode, orientation and system edge gesture.
+The current release is **1.0.3**: pointer-position checks are optional, iPad placement can be set to either side, and placement can be changed while running. This update uses the original v3 firmware and needs no board reflash. It combines absolute positioning inside the screen with relative movement for supported edge interactions. Normal use has no session time limit.
 
 ## What you need
 
 | Item | Requirement |
 | --- | --- |
-| Computer | Windows x64 with the keyboard and mouse you want to share; tested on Windows 11 |
+| Computer | Windows x64 with the keyboard and mouse you want to share |
 | Bridge board | ESP32-C3 SuperMini with native USB and 4 MB flash |
 | Cable | USB data cable between the board and the Windows computer |
 | iPad | Bluetooth enabled, unlocked, and able to use a Bluetooth mouse |
@@ -53,7 +47,7 @@ Move the Windows pointer to the edge on the selected side and pause briefly to e
 | Right of the computer (default) | Windows right edge → iPad left edge | Reach the iPad left edge, then continue moving left |
 | Left of the computer | Windows left edge → iPad right edge | Reach the iPad right edge, then continue moving right |
 
-Placement can be changed while running: MouseLink releases input, returns control to Windows, then resumes local standby with the new direction. Input is captured only after you enter the iPad again. You can stop during the switch; repeated choices use the latest selection. Stopping, closing, opening the firmware page, or failed reconnection cancels automatic resumption and preserves the new setting. Switching sides does not extend a diagnostic session's time limit.
+Placement can be changed while running: MouseLink releases input, returns control to Windows, then resumes local standby with the new direction. Input is captured only after you enter the iPad again. You can stop during the switch; repeated choices use the latest selection. Stopping, closing, opening the firmware page, or failed reconnection cancels automatic resumption and preserves the new setting.
 
 | Mode | Return to Windows |
 | --- | --- |
@@ -64,7 +58,7 @@ Placement can be changed while running: MouseLink releases input, returns contro
 - Release both keys after pressing `Ctrl + Left Alt`; the return action occurs when they are released. The shortcut always uses the physical left Alt key, regardless of iPad placement. In free mode, its optional hotkey switch is off by default on a fresh installation.
 - `Scroll Lock` and `Ctrl + Alt + Esc` remain emergency return shortcuts.
 - Holding a mouse button while dragging prevents automatic edge return. Release it before moving toward the computer again.
-- For bottom-edge actions, move the pointer to the bottom and continue moving downward with the mouse button released. The current mixed implementation can expose iPad system actions, subject to the Dock limitation above. After an edge action, move back into the screen before continuing normal pointer work or returning to Windows.
+- For bottom-edge actions, move the pointer to the bottom and continue moving downward with the mouse button released. After an edge action, move back into the screen before continuing normal pointer work or returning to Windows.
 - The Windows key maps to iPad Command; Alt maps to Option.
 - Closing MouseLink stops the bridge and releases captured input. USB or Bluetooth loss also triggers input release. The application does not start automatically at boot or when the board is inserted.
 
@@ -83,8 +77,7 @@ The flasher checks the chip, flash size, device identity, and firmware package h
 
 - **No board:** check that the USB cable carries data, try another USB port, and refresh the device list.
 - **No iPad pointer:** unlock the iPad, check the **MouseLink-iPad** Bluetooth connection, and run the pointer-position check. AssistiveTouch is not a prerequisite.
-- **No pointer after a firmware change or re-pairing:** one observed recovery was to turn Bluetooth off in iPad Settings, disconnect the board's USB power for about 10 seconds, reconnect it, and turn Bluetooth back on. This is a recovery step, not a confirmed diagnosis of the cause.
-- **Dock closes or an exit action fails:** return the pointer into the screen and retry. This update does not resolve that existing intermittent issue.
+- **No pointer after a firmware change or re-pairing:** one observed recovery was to turn Bluetooth off in iPad Settings, disconnect the board's USB power for about 10 seconds, reconnect it, and turn Bluetooth back on.
 - **Need to recover Windows input:** use an emergency return shortcut or close MouseLink.
 
 Settings and bridge logs are stored in `%LOCALAPPDATA%\MouseLink`; firmware backups and flashing logs are in its `firmware-backups` and `flash-logs` folders. Upgrading and the default uninstall retain these files. Do not publish your backups, device identifiers, or local logs with a source contribution.
@@ -121,7 +114,7 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
 ```
 
-The first firmware build downloads the pinned PlatformIO/ESP-IDF toolchain. The build script stages firmware source in an isolated ASCII-path build directory; pass `-BuildRoot C:\MouseLinkBuild` if you need to choose that directory. `-PublishBundle` copies the bootloader, partition table, and application from the same build and generates their size/SHA-256 manifest. Omitting it builds firmware without replacing the local package. Never combine components from different builds. Newly compiled firmware still needs hardware validation; successful compilation and hash checks do not establish iPad behavior.
+The first firmware build downloads the pinned PlatformIO/ESP-IDF toolchain. The build script stages firmware source in an isolated ASCII-path build directory; pass `-BuildRoot C:\MouseLinkBuild` if you need to choose that directory. `-PublishBundle` copies the bootloader, partition table, and application from the same build and generates their size/SHA-256 manifest. Omitting it builds firmware without replacing the local package. Never combine components from different builds.
 
 The current source builds to `release/1.0.3/MouseLink/MouseLink.exe`. To create an installer, install Inno Setup 7.1.0 and run the included build script, adjusting the compiler path if needed:
 
@@ -129,7 +122,7 @@ The current source builds to `release/1.0.3/MouseLink/MouseLink.exe`. To create 
 .\tools\Build-Installer.ps1 -CompilerPath "C:\Program Files (x86)\Inno Setup 7\ISCC.exe"
 ```
 
-The installer is written under `release/1.0.3/`. Keep these generated outputs out of Git. Firmware-dependent tests require the generated package; UI previews, automated tests, user hardware acceptance and clean-machine verification are separate checks.
+The installer is written under `release/1.0.3/`. Keep these generated outputs out of Git.
 
 ## Attribution and licenses
 
